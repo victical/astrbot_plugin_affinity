@@ -1,0 +1,11 @@
+.ace-tool/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+.codex-tasks/
+data/plugin_data/
+tests/
+sync_engram.sh
+* TO DO list.csv
+.claude/
