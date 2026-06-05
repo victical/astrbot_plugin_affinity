@@ -93,6 +93,11 @@ def validate_signal_payload(
         return None
     if intensity < 1 or intensity > 3:
         return None
+    if direction == "negative":
+        min_confidence = max(min_confidence, 0.75)
+    elif direction == "positive":
+        min_confidence = min(min_confidence, 0.60)
+
     if confidence < min_confidence or confidence > 1:
         return None
 
@@ -152,7 +157,7 @@ def _similar_evidence(left: str, right: str) -> bool:
     right_tokens = set(right.strip())
     if not left_tokens or not right_tokens:
         return False
-    return len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1) >= 0.6
+    return len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1) >= 0.8
 
 
 def aggregate_signals(signals: list[ReviewSignal]) -> list[ReviewSignal]:
@@ -161,6 +166,8 @@ def aggregate_signals(signals: list[ReviewSignal]) -> list[ReviewSignal]:
         duplicate_index = None
         for index, existing in enumerate(kept):
             if existing.type != signal.type:
+                continue
+            if existing.intensity != signal.intensity:
                 continue
             if _has_overlapping_refs(existing, signal) or _similar_evidence(
                 existing.evidence,

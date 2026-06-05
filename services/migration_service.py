@@ -3,23 +3,13 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 
 from ..core.models import AffinityEventType
 from ..core.rules import migration_key
 from ..db_manager import AffinityDatabaseManager
-
-
-LEVEL_FLOORS = {
-    1: 0,
-    2: 50,
-    3: 120,
-    4: 200,
-    5: 280,
-    6: 340,
-    7: 400,
-}
 
 
 @dataclass(slots=True)
@@ -52,8 +42,11 @@ def calculate_initial_affinity(
     formula_score = (
         memory_part + days_part + profile_part + preference_part + special_part
     ) * (439 / 400)
-    level_floor = LEVEL_FLOORS.get(int(old_level or 1), 0)
-    return int(round(min(439, max(formula_score, level_floor))))
+    level = max(1, min(7, int(old_level or 1)))
+    level_multiplier = 1.0 + (level - 1) * 0.05
+    final_score = min(439, formula_score * level_multiplier)
+    stable_score = Decimal(str(round(final_score, 8)))
+    return int(stable_score.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 class MigrationService:

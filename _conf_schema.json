@@ -55,6 +55,96 @@
     "type": "float",
     "default": 0.65
   },
+  "affinity_realtime_chat_score": {
+    "description": "当天第 1-10 条有效日常互动的实时好感分",
+    "type": "float",
+    "default": 3,
+    "hint": "实时聊天会按当天轮数衰减：1-10 轮使用本值。"
+  },
+  "affinity_realtime_chat_score_mid": {
+    "description": "当天第 11-20 条有效日常互动的实时好感分",
+    "type": "float",
+    "default": 2,
+    "hint": "情绪倍率会在衰减后的基础分上继续生效。"
+  },
+  "affinity_realtime_chat_score_late": {
+    "description": "当天第 21 条及以后有效日常互动的实时好感分",
+    "type": "float",
+    "default": 1.5,
+    "hint": "默认不封顶，但 20 轮后收益降低。"
+  },
+  "affinity_memory_recall_score": {
+    "description": "每次有效记忆召回的好感分",
+    "type": "float",
+    "default": 5,
+    "hint": "每日最多计入 affinity_memory_recall_daily_cap 次。"
+  },
+  "affinity_memory_recall_daily_cap": {
+    "description": "每日有效记忆召回次数上限",
+    "type": "int",
+    "default": 5
+  },
+  "affinity_negative_cap": {
+    "description": "实时和每日回顾合计的单日负向好感下限",
+    "type": "int",
+    "default": -60
+  },
+  "affinity_negative_decay_days": {
+    "description": "负面事件后的衰减期天数",
+    "type": "int",
+    "default": 3
+  },
+  "affinity_negative_decay_multiplier": {
+    "description": "衰减期内新负面事件的扣分倍率",
+    "type": "float",
+    "default": 0.5
+  },
+  "affinity_mood_system_enabled": {
+    "description": "启用情绪对实时互动分的倍率影响",
+    "type": "bool",
+    "default": true
+  },
+  "affinity_mood_multipliers": {
+    "description": "各情绪状态的实时互动分倍率",
+    "type": "object",
+    "items": {
+      "jealous": {
+        "description": "吃醋",
+        "type": "float",
+        "default": 0.8
+      },
+      "happy": {
+        "description": "开心",
+        "type": "float",
+        "default": 1.2
+      },
+      "low": {
+        "description": "低落",
+        "type": "float",
+        "default": 0.9
+      },
+      "cold_war": {
+        "description": "冷战",
+        "type": "float",
+        "default": 0.5
+      },
+      "calm": {
+        "description": "平静",
+        "type": "float",
+        "default": 1.0
+      }
+    }
+  },
+  "affinity_repair_window_hours": {
+    "description": "降阶后的关系修复窗口小时数",
+    "type": "float",
+    "default": 24
+  },
+  "affinity_repair_bonus_multiplier": {
+    "description": "修复窗口内正向实时互动的倍率",
+    "type": "float",
+    "default": 1.5
+  },
   "affinity_review_llm_model": {
     "description": "好感回顾分析使用的模型 id，留空使用当前默认 provider",
     "type": "string",
@@ -72,9 +162,9 @@
     "default": 80
   },
   "affinity_review_negative_cap": {
-    "description": "每日负向好感下限",
+    "description": "旧配置项：每日回顾负向下限。优化版优先使用 affinity_negative_cap 作为全局负向下限",
     "type": "int",
-    "default": -50
+    "default": -60
   },
   "affinity_stage_advance_enabled": {
     "description": "启用关系阶段每日推进",
@@ -85,6 +175,26 @@
     "description": "每天最多推进的关系阶段格数",
     "type": "int",
     "default": 1
+  },
+  "affinity_stage_advance_dynamic_threshold": {
+    "description": "好感银行余额达到该值时允许动态双阶推进",
+    "type": "int",
+    "default": 3
+  },
+  "affinity_stage_advance_dynamic_max_steps": {
+    "description": "动态推进触发后的每日最大推进格数",
+    "type": "int",
+    "default": 2
+  },
+  "affinity_consecutive_30d_bonus": {
+    "description": "连续互动 30 天后的每日回顾奖励",
+    "type": "float",
+    "default": 2
+  },
+  "affinity_consecutive_60d_bonus": {
+    "description": "连续互动 60 天后的每日回顾奖励",
+    "type": "float",
+    "default": 5
   },
   "affinity_max_stage_custom_prompt_enabled": {
     "description": "允许用户设置最高阶段自定义提示词",

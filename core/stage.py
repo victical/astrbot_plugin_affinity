@@ -21,9 +21,9 @@ def score_stage(score: float) -> RelationshipStage:
         return RelationshipStage.STRANGER
     if score <= 149:
         return RelationshipStage.FRIEND
-    if score <= 299:
+    if score <= 249:
         return RelationshipStage.CLOSE_FRIEND
-    if score <= 439:
+    if score <= 399:
         return RelationshipStage.AMBIGUOUS
     return RelationshipStage.LOVER_CANDIDATE
 

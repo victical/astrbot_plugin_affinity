@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
@@ -57,6 +58,15 @@ class QueryTarget:
     display_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReviewCommandArgs:
+    user_id: str
+    event_date: date
+    dry_run: bool
+    force_rebuild: bool
+    error: str | None = None
+
+
 def _event_sender_name(event: AstrMessageEvent) -> str:
     get_sender_name = getattr(event, "get_sender_name", None)
     if callable(get_sender_name):
@@ -103,6 +113,95 @@ def _migration_args(user_id: str = "", mode: str = "") -> tuple[str | None, bool
     return first or None, second.lower() in force_words
 
 
+def _parse_date_arg(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _parse_review_command_args(
+    *,
+    sender_user_id: str,
+    user_id: str = "",
+    event_date: str = "",
+    mode: str = "",
+    is_admin: bool = False,
+    today: date | None = None,
+) -> ReviewCommandArgs:
+    today = today or date.today()
+    sender = str(sender_user_id or "").strip()
+    tokens = [
+        str(item or "").strip()
+        for item in (user_id, event_date, mode)
+        if str(item or "").strip()
+    ]
+    mode_words = {
+        "dry_run": "dry_run",
+        "dry-run": "dry_run",
+        "preview": "dry_run",
+        "预览": "dry_run",
+        "write": "write",
+        "写入": "write",
+        "正式": "write",
+        "confirm": "write",
+        "force_rebuild": "force_rebuild",
+        "force-rebuild": "force_rebuild",
+        "rebuild": "force_rebuild",
+        "强制": "force_rebuild",
+        "重建": "force_rebuild",
+    }
+
+    target_user_id = ""
+    target_date = today
+    selected_mode = "dry_run"
+
+    for token in tokens:
+        normalized = mode_words.get(token.lower()) or mode_words.get(token)
+        parsed_date = _parse_date_arg(token)
+        if normalized:
+            selected_mode = normalized
+        elif parsed_date is not None:
+            target_date = parsed_date
+        elif not target_user_id:
+            target_user_id = token
+        else:
+            return ReviewCommandArgs(
+                user_id=sender,
+                event_date=target_date,
+                dry_run=True,
+                force_rebuild=False,
+                error="参数过多。用法：/好感回顾 [user_id] [date] [预览|写入|重建]",
+            )
+
+    target_user_id = target_user_id or sender
+    if not target_user_id:
+        return ReviewCommandArgs(
+            user_id="",
+            event_date=target_date,
+            dry_run=True,
+            force_rebuild=False,
+            error="无法识别发送者用户 ID。",
+        )
+
+    needs_admin = target_user_id != sender or selected_mode != "dry_run"
+    if needs_admin and not is_admin:
+        return ReviewCommandArgs(
+            user_id=target_user_id,
+            event_date=target_date,
+            dry_run=True,
+            force_rebuild=False,
+            error="只有管理员可以写入回顾、强制重建，或查询其他用户的回顾。",
+        )
+
+    return ReviewCommandArgs(
+        user_id=target_user_id,
+        event_date=target_date,
+        dry_run=selected_mode == "dry_run",
+        force_rebuild=selected_mode == "force_rebuild",
+    )
+
+
 MAX_STAGE_PROMPT_NOTICE = (
     "你现在可以设置自己的最高阶段自定义提示词。\n"
     "使用：/设置提示词 <提示词>\n"
@@ -110,7 +209,7 @@ MAX_STAGE_PROMPT_NOTICE = (
 )
 
 
-@register("astrbot_plugin_affinity", "victical", "好感度与关系系统插件", "0.1.0")
+@register("astrbot_plugin_affinity", "victical", "好感度与关系系统插件", "1.3.0")
 class AffinityPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -145,7 +244,31 @@ class AffinityPlugin(Star):
 
         data_dir = self._get_data_dir()
         self.db = AffinityDatabaseManager(data_dir / "affinity.db")
-        self.service = AffinityService(self.db)
+        affinity_options = {
+            "realtime_chat_score": float(_config_get(self.config, "affinity_realtime_chat_score", 3)),
+            "realtime_chat_score_mid": float(
+                _config_get(self.config, "affinity_realtime_chat_score_mid", 2)
+            ),
+            "realtime_chat_score_late": float(
+                _config_get(self.config, "affinity_realtime_chat_score_late", 1.5)
+            ),
+            "memory_recall_score": float(_config_get(self.config, "affinity_memory_recall_score", 5)),
+            "memory_recall_daily_cap": int(_config_get(self.config, "affinity_memory_recall_daily_cap", 5)),
+            "negative_cap": float(_config_get(self.config, "affinity_negative_cap", -60)),
+            "negative_decay_days": int(_config_get(self.config, "affinity_negative_decay_days", 3)),
+            "negative_decay_multiplier": float(
+                _config_get(self.config, "affinity_negative_decay_multiplier", 0.5)
+            ),
+            "mood_system_enabled": bool(
+                _config_get(self.config, "affinity_mood_system_enabled", True)
+            ),
+            "mood_multipliers": _config_get(self.config, "affinity_mood_multipliers", {}),
+            "repair_window_hours": float(_config_get(self.config, "affinity_repair_window_hours", 24)),
+            "repair_bonus_multiplier": float(
+                _config_get(self.config, "affinity_repair_bonus_multiplier", 1.5)
+            ),
+        }
+        self.service = AffinityService(self.db, options=affinity_options)
         review_options = {
             "session_gap_minutes": int(
                 _config_get(self.config, "affinity_review_session_gap_minutes", 45)
@@ -153,12 +276,30 @@ class AffinityPlugin(Star):
             "max_messages_per_session": int(
                 _config_get(self.config, "affinity_review_max_messages_per_session", 80)
             ),
-            "negative_cap": float(_config_get(self.config, "affinity_review_negative_cap", -50)),
+            "negative_cap": float(
+                _config_get(
+                    self.config,
+                    "affinity_negative_cap",
+                    _config_get(self.config, "affinity_review_negative_cap", -60),
+                )
+            ),
             "stage_advance_enabled": bool(
                 _config_get(self.config, "affinity_stage_advance_enabled", True)
             ),
             "stage_advance_max_steps_per_day": int(
                 _config_get(self.config, "affinity_stage_advance_max_steps_per_day", 1)
+            ),
+            "stage_advance_dynamic_threshold": int(
+                _config_get(self.config, "affinity_stage_advance_dynamic_threshold", 3)
+            ),
+            "stage_advance_dynamic_max_steps": int(
+                _config_get(self.config, "affinity_stage_advance_dynamic_max_steps", 2)
+            ),
+            "consecutive_30d_bonus": float(
+                _config_get(self.config, "affinity_consecutive_30d_bonus", 2)
+            ),
+            "consecutive_60d_bonus": float(
+                _config_get(self.config, "affinity_consecutive_60d_bonus", 5)
             ),
         }
         signal_analyzer = AffinitySignalAnalyzer(
@@ -326,24 +467,36 @@ class AffinityPlugin(Star):
         ):
             yield result
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("好感回顾")
     async def affinity_review(
         self,
         event: AstrMessageEvent,
-        user_id: str,
+        user_id: str = "",
         event_date: str = "",
         mode: str = "",
     ):
+        parsed = _parse_review_command_args(
+            sender_user_id=_event_user_id(event),
+            user_id=user_id,
+            event_date=event_date,
+            mode=mode,
+            is_admin=bool(getattr(event, "is_admin", lambda: False)()),
+        )
+
+        async def call_review():
+            if parsed.error:
+                return parsed.error
+            return await self.command_handler.handle_daily_review(
+                parsed.user_id,
+                parsed.event_date,
+                dry_run=parsed.dry_run,
+                force_rebuild=parsed.force_rebuild,
+            )
+
         async for result in self._run_command(
             event,
             "好感回顾",
-            lambda: self.command_handler.handle_daily_review(
-                user_id,
-                event_date or None,
-                dry_run=mode == "dry_run",
-                force_rebuild=mode == "force_rebuild",
-            ),
+            call_review,
         ):
             yield result
 

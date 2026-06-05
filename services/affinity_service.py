@@ -8,8 +8,8 @@ from typing import Any
 from ..core.confirmation import decide_confirmation_transition
 from ..core.models import AffinityEventType, ConfirmationStatus, RelationshipStage
 from ..core.rules import (
-    DEFAULT_NEGATIVE_CAP,
-    apply_daily_cap,
+    DEFAULT_MEMORY_RECALL_CAP,
+    apply_global_negative_cap,
     message_key,
 )
 from ..core.stage_progression import demote_stage
@@ -45,8 +45,65 @@ class UserSnapshot:
 
 
 class AffinityService:
-    def __init__(self, db: AffinityDatabaseManager):
+    def __init__(
+        self,
+        db: AffinityDatabaseManager,
+        options: dict[str, Any] | None = None,
+    ):
         self.db = db
+        self.options = options or {}
+
+    def _option_float(self, key: str, default: float) -> float:
+        try:
+            return float(self.options.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _option_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.options.get(key, default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    @property
+    def realtime_chat_score(self) -> float:
+        return self._option_float("realtime_chat_score", 3)
+
+    @property
+    def realtime_chat_score_mid(self) -> float:
+        return self._option_float("realtime_chat_score_mid", 2)
+
+    @property
+    def realtime_chat_score_late(self) -> float:
+        return self._option_float("realtime_chat_score_late", 1.5)
+
+    @property
+    def memory_recall_score(self) -> float:
+        return max(0.01, self._option_float("memory_recall_score", 5))
+
+    @property
+    def memory_recall_daily_cap(self) -> int:
+        return self._option_int("memory_recall_daily_cap", DEFAULT_MEMORY_RECALL_CAP)
+
+    @property
+    def global_negative_cap(self) -> float:
+        return self._option_float("negative_cap", -60)
+
+    @property
+    def negative_decay_days(self) -> int:
+        return self._option_int("negative_decay_days", 3)
+
+    @property
+    def negative_decay_multiplier(self) -> float:
+        return self._option_float("negative_decay_multiplier", 0.5)
+
+    @property
+    def repair_window_hours(self) -> float:
+        return self._option_float("repair_window_hours", 24)
+
+    @property
+    def repair_bonus_multiplier(self) -> float:
+        return self._option_float("repair_bonus_multiplier", 1.5)
 
     def _update_counter_delta(
         self,
@@ -60,6 +117,96 @@ class AffinityService:
         current = float(getattr(counter, field) or 0)
         self.db.update_daily_counter(user_id, event_date, **{field: current + delta})
 
+    def _apply_mood_multiplier(self, user_id: str, base_delta: float) -> float:
+        if not bool(self.options.get("mood_system_enabled", True)):
+            return float(base_delta)
+        state = self.db.get_or_create_user_state(user_id)
+        multipliers = {
+            "吃醋": 0.8,
+            "开心": 1.2,
+            "低落": 0.9,
+            "冷战": 0.5,
+            "平静": 1.0,
+        }
+        configured = self.options.get("mood_multipliers")
+        if isinstance(configured, dict):
+            aliases = {
+                "jealous": "吃醋",
+                "happy": "开心",
+                "low": "低落",
+                "cold_war": "冷战",
+                "calm": "平静",
+            }
+            for key, value in configured.items():
+                if not str(key).strip():
+                    continue
+                try:
+                    multipliers[aliases.get(str(key), str(key))] = float(value)
+                except (TypeError, ValueError):
+                    continue
+        return float(base_delta) * multipliers.get(str(state.current_mood or "").strip(), 1.0)
+
+    def _realtime_chat_score_for_turn(self, turn_number: int) -> float:
+        if turn_number <= 10:
+            return self.realtime_chat_score
+        if turn_number <= 20:
+            return self.realtime_chat_score_mid
+        return self.realtime_chat_score_late
+
+    def _check_repair_window(self, user_id: str) -> bool:
+        state = self.db.get_or_create_user_state(user_id)
+        demote_at = state.last_demote_at
+        if not demote_at:
+            return False
+        if isinstance(demote_at, str):
+            try:
+                demote_at = datetime.fromisoformat(demote_at)
+            except ValueError:
+                return False
+        return (datetime.now() - demote_at).total_seconds() <= self.repair_window_hours * 3600
+
+    def _update_interaction_streak(self, user_id: str, event_day: date) -> None:
+        state = self.db.get_or_create_user_state(user_id)
+        last_day = state.last_interaction_date
+        if isinstance(last_day, str):
+            try:
+                last_day = date.fromisoformat(last_day)
+            except ValueError:
+                last_day = None
+        if last_day == event_day - timedelta(days=1):
+            state.consecutive_interaction_days = (
+                int(state.consecutive_interaction_days or 0) + 1
+            )
+        elif last_day != event_day:
+            state.consecutive_interaction_days = 1
+        state.last_interaction_date = event_day
+        state.save()
+
+    def _latest_negative_event_date_before(
+        self,
+        user_id: str,
+        event_day: date,
+    ) -> date | None:
+        query = (
+            self.db.AffinityDailyCounter.select()
+            .where(
+                (self.db.AffinityDailyCounter.user_id == user_id)
+                & (self.db.AffinityDailyCounter.last_negative_event_date.is_null(False))
+                & (self.db.AffinityDailyCounter.event_date < event_day)
+            )
+            .order_by(self.db.AffinityDailyCounter.event_date.desc())
+        )
+        counter = query.first()
+        if counter is None:
+            return None
+        last_day = counter.last_negative_event_date
+        if isinstance(last_day, str):
+            try:
+                return date.fromisoformat(last_day)
+            except ValueError:
+                return None
+        return last_day
+
     async def record_daily_chat(
         self,
         user_id: str,
@@ -68,12 +215,20 @@ class AffinityService:
     ):
         event_day = parse_event_date(event_date)
         counter = self.db.get_or_create_daily_counter(user_id, event_day)
-        delta = 6
+        turn_number = int(float(counter.daily_chat_turns or 0)) + 1
+        base_score = self._realtime_chat_score_for_turn(turn_number)
+        delta = self._apply_mood_multiplier(user_id, base_score)
+        if self._check_repair_window(user_id) and delta > 0:
+            delta *= self.repair_bonus_multiplier
+            reason = f"有效日常互动 (修复期×{self.repair_bonus_multiplier:g})"
+        else:
+            reason = "有效日常互动"
+        delta = round(delta, 2)
         result = self.db.apply_score_event(
             user_id=user_id,
             event_type=AffinityEventType.DAILY_CHAT.value,
             score_delta=delta,
-            reason="有效日常互动",
+            reason=reason,
             source="message",
             source_ref=message_id,
             message_id=message_id,
@@ -81,12 +236,15 @@ class AffinityService:
             idempotency_key=message_key(message_id, AffinityEventType.DAILY_CHAT.value),
         )
         if result.applied:
+            applied_delta = float(result.event.score_delta or 0) if result.event else 0
             self.db.update_daily_counter(
                 user_id,
                 event_day,
-                realtime_positive_delta=float(counter.realtime_positive_delta or 0) + delta,
+                realtime_positive_delta=float(counter.realtime_positive_delta or 0)
+                + applied_delta,
                 daily_chat_turns=float(counter.daily_chat_turns or 0) + 1,
             )
+            self._update_interaction_streak(user_id, event_day)
         return result
 
     async def record_memory_recall(
@@ -98,7 +256,12 @@ class AffinityService:
     ):
         event_day = parse_event_date(event_date)
         counter = self.db.get_or_create_daily_counter(user_id, event_day)
-        delta = 2
+        recall_score = self.memory_recall_score
+        memory_events = int(float(counter.memory_recall_count or 0) // recall_score)
+        if memory_events >= self.memory_recall_daily_cap:
+            delta = 0
+        else:
+            delta = recall_score
         result = self.db.apply_score_event(
             user_id=user_id,
             event_type=AffinityEventType.MEMORY_RECALL.value,
@@ -111,10 +274,12 @@ class AffinityService:
             idempotency_key=message_key(message_id, f"memory_recall:{memory_id}"),
         )
         if result.applied:
+            applied_delta = float(result.event.score_delta or 0) if result.event else 0
             self.db.update_daily_counter(
                 user_id,
                 event_day,
-                memory_recall_count=float(counter.memory_recall_count or 0) + delta,
+                memory_recall_count=float(counter.memory_recall_count or 0)
+                + applied_delta,
             )
         return result
 
@@ -157,10 +322,29 @@ class AffinityService:
     ):
         event_day = parse_event_date(event_date)
         counter = self.db.get_or_create_daily_counter(user_id, event_day)
-        capped_delta = apply_daily_cap(
-            current_delta=float(counter.negative_delta or 0),
-            requested_delta=min(0, delta),
-            cap=DEFAULT_NEGATIVE_CAP,
+        requested_delta = min(0, delta)
+        latest_negative_day = counter.last_negative_event_date
+        if isinstance(latest_negative_day, str):
+            try:
+                latest_negative_day = date.fromisoformat(latest_negative_day)
+            except ValueError:
+                latest_negative_day = None
+        latest_negative_day = latest_negative_day or self._latest_negative_event_date_before(
+            user_id,
+            event_day,
+        )
+        if latest_negative_day is not None:
+            days_since = (event_day - latest_negative_day).days
+            if 0 < days_since <= self.negative_decay_days:
+                requested_delta *= self.negative_decay_multiplier
+                reason = f"{reason} (衰减期×{self.negative_decay_multiplier:g})"
+
+        capped_delta = apply_global_negative_cap(
+            user_id=user_id,
+            event_date=event_day,
+            requested_delta=requested_delta,
+            db_manager=self.db,
+            cap=self.global_negative_cap,
         )
         result = self.db.apply_score_event(
             user_id=user_id,
@@ -177,6 +361,7 @@ class AffinityService:
                 user_id,
                 event_day,
                 negative_delta=float(counter.negative_delta or 0) + capped_delta,
+                last_negative_event_date=event_day if capped_delta < 0 else latest_negative_day,
             )
             state = result.user_state
             if state is not None and capped_delta < 0:
@@ -184,6 +369,7 @@ class AffinityService:
                 current = getattr(state, "unlocked_stage", state.effective_stage)
                 next_stage = demote_stage(current, target)
                 if next_stage != current:
+                    state.last_demote_at = datetime.now()
                     self.db.insert_event(
                         user_id=user_id,
                         event_type=AffinityEventType.STAGE_UNLOCK.value,

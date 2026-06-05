@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from ..core.stage_progression import calculate_stage_progress
 from ..services.affinity_service import AffinityService
 
 
@@ -18,11 +19,24 @@ class AffinityCommandHandler:
 
     def format_query(self, state, display_name: str | None = None) -> str:
         display_user = str(display_name or "").strip() or state.user_id
-        return (
-            f"用户: {display_user}\n"
-            f"好感度: {float(state.affinity_score):.0f}\n"
-            f"关系阶段: {state.stage}"
+        lines = [
+            f"用户: {display_user}",
+            f"好感度: {float(state.affinity_score):.0f}",
+            f"关系阶段: {state.effective_stage}",
+        ]
+        progress = calculate_stage_progress(
+            float(state.affinity_score or 0),
+            getattr(state, "unlocked_stage", None) or state.effective_stage,
         )
+        if progress["next_stage"]:
+            lines.append(
+                f"距离 {progress['next_stage']}: "
+                f"{progress['score_needed']}分 "
+                f"(预计{progress['days_estimate']}天)"
+            )
+            if progress["bank_balance"] > 0:
+                lines.append(f"银行余额: {progress['bank_balance']}阶")
+        return "\n".join(lines)
 
     async def handle_query(self, user_id: str, display_name: str | None = None) -> str:
         state = self.service.db.get_or_create_user_state(user_id)
@@ -88,7 +102,7 @@ class AffinityCommandHandler:
             dry_run=dry_run,
             force_rebuild=force_rebuild,
         )
-        mode = "dry-run" if dry_run else "已写入" if result.written else "已跳过"
+        mode = "预览" if dry_run else "已写入" if result.written else "已跳过"
         if dry_run:
             lines = [
                 f"每日回顾 {mode}:",

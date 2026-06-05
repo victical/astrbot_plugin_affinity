@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from typing import Any
+
 from .models import RelationshipStage
 from .stage import score_stage
 
@@ -14,6 +17,16 @@ STAGE_ORDER = [
     RelationshipStage.AMBIGUOUS.value,
     RelationshipStage.LOVER_CANDIDATE.value,
 ]
+
+STAGE_NEXT_THRESHOLDS = {
+    RelationshipStage.COLD_WAR.value: -70,
+    RelationshipStage.DISLIKE.value: -30,
+    RelationshipStage.DISTANT.value: 0,
+    RelationshipStage.STRANGER.value: 50,
+    RelationshipStage.FRIEND.value: 150,
+    RelationshipStage.CLOSE_FRIEND.value: 250,
+    RelationshipStage.AMBIGUOUS.value: 400,
+}
 
 
 def _normalize_stage(stage: str | RelationshipStage | None) -> str:
@@ -55,3 +68,46 @@ def demote_stage(
 
 def bank_balance(score: float, unlocked_stage: str | RelationshipStage | None) -> int:
     return max(0, stage_index(score_stage(score)) - stage_index(unlocked_stage))
+
+
+def calculate_stage_progress(
+    current_score: float,
+    unlocked_stage: str | RelationshipStage | None,
+) -> dict[str, Any]:
+    current = _normalize_stage(unlocked_stage)
+    current_index = stage_index(current)
+    if current_index >= len(STAGE_ORDER) - 1:
+        return {
+            "next_stage": None,
+            "score_needed": 0,
+            "days_estimate": 0,
+            "bank_balance": 0,
+        }
+
+    next_stage = STAGE_ORDER[current_index + 1]
+    next_threshold = STAGE_NEXT_THRESHOLDS[current]
+    score_needed = max(0, int(math.ceil(next_threshold - float(current_score or 0))))
+    days_estimate = math.ceil(score_needed / 15) if score_needed > 0 else 0
+    return {
+        "next_stage": next_stage,
+        "score_needed": score_needed,
+        "days_estimate": days_estimate,
+        "bank_balance": bank_balance(float(current_score or 0), current),
+    }
+
+
+def advance_stage_dynamic(
+    unlocked_stage: str | RelationshipStage | None,
+    target_stage: str | RelationshipStage | None,
+    bank_balance_value: int,
+    *,
+    dynamic_threshold: int = 3,
+    base_max_steps: int = 1,
+    boosted_max_steps: int = 2,
+) -> str:
+    max_steps = (
+        int(boosted_max_steps)
+        if int(bank_balance_value or 0) >= int(dynamic_threshold)
+        else int(base_max_steps)
+    )
+    return advance_stage(unlocked_stage, target_stage, max_steps=max_steps)

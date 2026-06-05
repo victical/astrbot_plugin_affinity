@@ -13,6 +13,7 @@ from peewee import (
     DateTimeField,
     FloatField,
     IntegrityError,
+    IntegerField,
     Model,
     SqliteDatabase,
     TextField,
@@ -62,9 +63,12 @@ class AffinityUserState(_AffinityBaseModel):
     impression_tags_json = TextField(default="[]")
     current_mood = TextField(default=Mood.CALM.value)
     last_interaction_at = DateTimeField(null=True)
+    last_interaction_date = DateField(null=True)
     last_negative_at = DateTimeField(null=True)
+    last_demote_at = DateTimeField(null=True)
     last_proactive_prompt_at = DateTimeField(null=True)
     daily_review_at = DateTimeField(null=True)
+    consecutive_interaction_days = IntegerField(default=0)
     created_at = DateTimeField(default=_utcnow)
     updated_at = DateTimeField(default=_utcnow)
 
@@ -116,6 +120,8 @@ class AffinityDailyCounter(_AffinityBaseModel):
     realtime_positive_delta = FloatField(default=0)
     review_positive_delta = FloatField(default=0)
     negative_delta = FloatField(default=0)
+    review_negative_delta = FloatField(default=0)
+    last_negative_event_date = DateField(null=True)
     daily_chat_turns = FloatField(default=0)
     profile_growth_count = FloatField(default=0)
     memory_recall_count = FloatField(default=0)
@@ -185,6 +191,7 @@ class AffinityDatabaseManager:
             safe=True,
         )
         self._ensure_user_state_columns()
+        self._ensure_daily_counter_columns()
 
     def _ensure_user_state_columns(self) -> None:
         existing = {
@@ -208,6 +215,37 @@ class AffinityDatabaseManager:
         if "max_stage_prompt_notice_sent_at" not in existing:
             migrator_sql.append(
                 "ALTER TABLE affinity_user_state ADD COLUMN max_stage_prompt_notice_sent_at DATETIME"
+            )
+        if "last_demote_at" not in existing:
+            migrator_sql.append(
+                "ALTER TABLE affinity_user_state ADD COLUMN last_demote_at DATETIME"
+            )
+        if "consecutive_interaction_days" not in existing:
+            migrator_sql.append(
+                "ALTER TABLE affinity_user_state "
+                "ADD COLUMN consecutive_interaction_days INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_interaction_date" not in existing:
+            migrator_sql.append(
+                "ALTER TABLE affinity_user_state ADD COLUMN last_interaction_date DATE"
+            )
+        for statement in migrator_sql:
+            self.db.execute_sql(statement)
+
+    def _ensure_daily_counter_columns(self) -> None:
+        existing = {
+            column.name
+            for column in self.db.get_columns(self.AffinityDailyCounter._meta.table_name)
+        }
+        migrator_sql = []
+        if "review_negative_delta" not in existing:
+            migrator_sql.append(
+                "ALTER TABLE affinity_daily_counters "
+                "ADD COLUMN review_negative_delta REAL NOT NULL DEFAULT 0"
+            )
+        if "last_negative_event_date" not in existing:
+            migrator_sql.append(
+                "ALTER TABLE affinity_daily_counters ADD COLUMN last_negative_event_date DATE"
             )
         for statement in migrator_sql:
             self.db.execute_sql(statement)
@@ -233,9 +271,12 @@ class AffinityDatabaseManager:
             "impression_tags_json": "[]",
             "current_mood": Mood.CALM.value,
             "last_interaction_at": None,
+            "last_interaction_date": None,
             "last_negative_at": None,
+            "last_demote_at": None,
             "last_proactive_prompt_at": None,
             "daily_review_at": None,
+            "consecutive_interaction_days": 0,
             "created_at": now,
             "updated_at": now,
         }
@@ -544,6 +585,8 @@ class AffinityDatabaseManager:
                 "realtime_positive_delta": 0,
                 "review_positive_delta": 0,
                 "negative_delta": 0,
+                "review_negative_delta": 0,
+                "last_negative_event_date": None,
                 "daily_chat_turns": 0,
                 "profile_growth_count": 0,
                 "memory_recall_count": 0,

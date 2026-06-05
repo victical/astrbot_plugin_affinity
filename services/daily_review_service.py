@@ -12,12 +12,11 @@ from ..core.review_signals import (
     score_signals_with_negative_cap,
 )
 from ..core.rules import (
-    DEFAULT_DAILY_REVIEW_NEGATIVE_CAP,
-    apply_daily_cap,
+    DEFAULT_GLOBAL_NEGATIVE_CAP,
     daily_key,
 )
 from ..core.stage import effective_stage, score_stage
-from ..core.stage_progression import advance_stage, bank_balance
+from ..core.stage_progression import advance_stage_dynamic, bank_balance
 from ..db_manager import AffinityDatabaseManager
 from .affinity_service import parse_event_date
 from .conversation_slicer import slice_conversation
@@ -86,14 +85,73 @@ class DailyReviewService:
     def max_stage_steps_per_day(self) -> int:
         return int(self.review_options.get("stage_advance_max_steps_per_day", 1))
 
+    @property
+    def stage_advance_dynamic_threshold(self) -> int:
+        return int(self.review_options.get("stage_advance_dynamic_threshold", 3))
+
+    @property
+    def stage_advance_dynamic_max_steps(self) -> int:
+        return int(self.review_options.get("stage_advance_dynamic_max_steps", 2))
+
+    @property
+    def global_negative_cap(self) -> float:
+        return float(self.review_options.get("negative_cap", DEFAULT_GLOBAL_NEGATIVE_CAP))
+
+    @property
+    def consecutive_30d_bonus(self) -> float:
+        return float(self.review_options.get("consecutive_30d_bonus", 2))
+
+    @property
+    def consecutive_60d_bonus(self) -> float:
+        return float(self.review_options.get("consecutive_60d_bonus", 5))
+
     def _casual_chat_score(self, turns: int) -> int:
         if turns <= 0:
             return 0
         if turns <= 2:
-            return 1
+            return 0
         if turns <= 5:
             return 2
-        return 3
+        if turns <= 14:
+            return 3
+        return 5
+
+    def _cap_review_candidates(
+        self,
+        user_id: str,
+        event_day: date,
+        candidates: list[DailyReviewCandidate],
+    ) -> list[DailyReviewCandidate]:
+        capped: list[DailyReviewCandidate] = []
+        counter = self.db.get_or_create_daily_counter(user_id, event_day)
+        current_negative = float(counter.negative_delta or 0) + float(
+            counter.review_negative_delta or 0
+        )
+        local_review_negative = 0.0
+        for candidate in candidates:
+            if candidate.score_delta >= 0:
+                capped.append(candidate)
+                continue
+
+            remaining = self.global_negative_cap - (
+                current_negative + local_review_negative
+            )
+            if remaining >= 0:
+                continue
+            delta = max(candidate.score_delta, remaining)
+            if delta == 0:
+                continue
+            local_review_negative += delta
+            capped.append(
+                DailyReviewCandidate(
+                    event_type=candidate.event_type,
+                    score_delta=delta,
+                    reason=candidate.reason,
+                    source_ref=candidate.source_ref,
+                    metadata=candidate.metadata,
+                )
+            )
+        return capped
 
     async def _build_candidates(
         self,
@@ -140,7 +198,7 @@ class DailyReviewService:
             candidates.append(
                 DailyReviewCandidate(
                     event_type=AffinityEventType.MEMORY_RECALL.value,
-                    score_delta=min(5, len(memory_refs) * 2),
+                    score_delta=min(25, len(memory_refs) * 5),
                     reason="今日形成或命中长期记忆",
                     source_ref="memory_refs",
                     metadata={"memory_refs": memory_refs[:5]},
@@ -160,42 +218,30 @@ class DailyReviewService:
                 )
             )
 
-        capped: list[DailyReviewCandidate] = []
-        current_negative = 0.0
-        for candidate in candidates:
-            if candidate.event_type == AffinityEventType.PROFILE_GROWTH.value:
-                capped.append(candidate)
-                continue
-
-            requested_delta = candidate.score_delta
-            if requested_delta > 0:
-                capped.append(candidate)
-                continue
-            elif requested_delta < 0:
-                current_delta = current_negative
-                cap = DEFAULT_DAILY_REVIEW_NEGATIVE_CAP
-            else:
-                continue
-
-            delta = apply_daily_cap(
-                current_delta=current_delta,
-                requested_delta=requested_delta,
-                cap=cap,
-            )
-            if delta == 0:
-                continue
-            if delta < 0:
-                current_negative += delta
-            capped.append(
+        state = self.db.get_or_create_user_state(user_id)
+        consecutive_days = int(state.consecutive_interaction_days or 0)
+        if consecutive_days >= 60:
+            candidates.append(
                 DailyReviewCandidate(
-                    event_type=candidate.event_type,
-                    score_delta=delta,
-                    reason=candidate.reason,
-                    source_ref=candidate.source_ref,
-                    metadata=candidate.metadata,
+                    event_type=AffinityEventType.DAILY_REVIEW.value,
+                    score_delta=self.consecutive_60d_bonus,
+                    reason="长期陪伴奖励 (连续60天)",
+                    source_ref="consecutive_bonus",
+                    metadata={"consecutive_days": consecutive_days},
                 )
             )
-        return capped
+        elif consecutive_days >= 30:
+            candidates.append(
+                DailyReviewCandidate(
+                    event_type=AffinityEventType.DAILY_REVIEW.value,
+                    score_delta=self.consecutive_30d_bonus,
+                    reason="长期陪伴奖励 (连续30天)",
+                    source_ref="consecutive_bonus",
+                    metadata={"consecutive_days": consecutive_days},
+                )
+            )
+
+        return self._cap_review_candidates(user_id, event_day, candidates)
 
     async def _build_llm_review_candidates(
         self,
@@ -231,7 +277,7 @@ class DailyReviewService:
             negative_cap = float(
                 self.review_options.get(
                     "negative_cap",
-                    DEFAULT_DAILY_REVIEW_NEGATIVE_CAP,
+                    self.global_negative_cap,
                 )
             )
             candidates = []
@@ -258,7 +304,7 @@ class DailyReviewService:
                 )
 
             return DailyReviewDiagnostics(
-                candidates=candidates,
+                candidates=self._cap_review_candidates(user_id, event_day, candidates),
                 session_count=len(sessions),
                 raw_signal_count=raw_count,
                 valid_signal_count=len(aggregated),
@@ -294,7 +340,12 @@ class DailyReviewService:
         events = self._review_rebuild_events(user_id, event_day)
         self.db.delete_events(events)
         self.db.recompute_user_state_from_events(user_id)
-        self.db.update_daily_counter(user_id, event_day, review_positive_delta=0)
+        self.db.update_daily_counter(
+            user_id,
+            event_day,
+            review_positive_delta=0,
+            review_negative_delta=0,
+        )
 
     async def run_for_user(
         self,
@@ -370,6 +421,8 @@ class DailyReviewService:
             self._remove_existing_review_events(user_id, event_day)
 
         written_delta = 0.0
+        written_positive_delta = 0.0
+        written_negative_delta = 0.0
         for candidate in candidates:
             signal_type = candidate.metadata.get("signal_type")
             event_index = candidate.metadata.get("event_index")
@@ -395,18 +448,25 @@ class DailyReviewService:
                 metadata_json=candidate.metadata,
             )
             if result.applied:
-                written_delta += float(result.event.score_delta or 0)
+                applied_delta = float(result.event.score_delta or 0)
+                written_delta += applied_delta
+                if applied_delta > 0:
+                    written_positive_delta += applied_delta
+                elif applied_delta < 0:
+                    written_negative_delta += applied_delta
 
         state = self.db.get_or_create_user_state(user_id)
         state.daily_review_at = datetime.now()
         state.save()
         if self.stage_advance_enabled:
             self.advance_stage_for_day(user_id, event_day)
-        self.db.update_daily_counter(
-            user_id,
-            event_day,
-            review_positive_delta=written_delta,
-        )
+        counter_updates = {
+            "review_positive_delta": written_positive_delta,
+            "review_negative_delta": written_negative_delta,
+        }
+        if written_negative_delta < 0:
+            counter_updates["last_negative_event_date"] = event_day
+        self.db.update_daily_counter(user_id, event_day, **counter_updates)
         return DailyReviewResult(
             user_id=user_id,
             event_date=event_day,
@@ -430,10 +490,13 @@ class DailyReviewService:
         return {
             "current_stage": current,
             "bank_balance": bank_balance(projected_score, current),
-            "next_advance_stage": advance_stage(
+            "next_advance_stage": advance_stage_dynamic(
                 current,
                 target,
-                max_steps=self.max_stage_steps_per_day,
+                bank_balance(projected_score, current),
+                dynamic_threshold=self.stage_advance_dynamic_threshold,
+                base_max_steps=self.max_stage_steps_per_day,
+                boosted_max_steps=self.stage_advance_dynamic_max_steps,
             ),
         }
 
@@ -443,17 +506,21 @@ class DailyReviewService:
             return
         current = getattr(state, "unlocked_stage", None) or state.effective_stage
         target = score_stage(float(state.affinity_score or 0)).value
-        next_stage = advance_stage(
+        balance = bank_balance(float(state.affinity_score or 0), current)
+        next_stage = advance_stage_dynamic(
             current,
             target,
-            max_steps=self.max_stage_steps_per_day,
+            balance,
+            dynamic_threshold=self.stage_advance_dynamic_threshold,
+            base_max_steps=self.max_stage_steps_per_day,
+            boosted_max_steps=self.stage_advance_dynamic_max_steps,
         )
         if next_stage != current:
             self.db.insert_event(
                 user_id=user_id,
                 event_type=AffinityEventType.STAGE_UNLOCK.value,
                 score_delta=0,
-                reason="每日刷新推进关系阶段",
+                reason=f"每日刷新推进关系阶段 (余额:{balance})",
                 source="stage_progression",
                 source_ref=event_day.isoformat(),
                 event_date=event_day,
@@ -463,6 +530,7 @@ class DailyReviewService:
                     "from_stage": current,
                     "to_stage": next_stage,
                     "score": float(state.affinity_score or 0),
+                    "bank_balance": balance,
                 },
             )
             state.unlocked_stage = next_stage
