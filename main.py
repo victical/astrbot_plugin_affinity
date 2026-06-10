@@ -285,11 +285,7 @@ class AffinityPlugin(Star):
                 _config_get(self.config, "affinity_review_max_messages_per_session", 80)
             ),
             "negative_cap": float(
-                _config_get(
-                    self.config,
-                    "affinity_negative_cap",
-                    _config_get(self.config, "affinity_review_negative_cap", -60),
-                )
+                _config_get(self.config, "affinity_negative_cap", -60)
             ),
             "stage_advance_enabled": bool(
                 _config_get(self.config, "affinity_stage_advance_enabled", True)

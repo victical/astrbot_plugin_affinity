@@ -12,7 +12,6 @@ from ..core.rules import (
     apply_global_negative_cap,
     message_key,
 )
-from ..core.stage_progression import demote_stage
 from ..core.stage import effective_stage, score_stage
 from ..db_manager import AffinityDatabaseManager
 
@@ -366,42 +365,10 @@ class AffinityService:
                     event_day,
                     last_negative_event_date=event_day,
                 )
-            state = result.user_state
-            if state is not None and capped_delta < 0:
-                target = score_stage(float(state.affinity_score or 0)).value
-                current = getattr(state, "unlocked_stage", state.effective_stage)
-                next_stage = demote_stage(current, target)
-                if next_stage != current:
+                # 记录降阶时间用于修复期判定
+                state = result.user_state
+                if state is not None:
                     state.last_demote_at = datetime.now()
-                    self.db.insert_event(
-                        user_id=user_id,
-                        event_type=AffinityEventType.STAGE_UNLOCK.value,
-                        score_delta=0,
-                        reason="负向事件即时下修关系阶段",
-                        source="stage_progression",
-                        source_ref=source_ref,
-                        event_date=event_day,
-                        idempotency_key=_event_key(
-                            "stage-demote",
-                            user_id,
-                            event_day.isoformat(),
-                            event_type,
-                            source_ref,
-                        ),
-                        metadata_json={
-                            "direction": "down",
-                            "from_stage": current,
-                            "to_stage": next_stage,
-                            "score": float(state.affinity_score or 0),
-                        },
-                    )
-                    state.unlocked_stage = next_stage
-                    state.effective_stage = effective_stage(
-                        float(state.affinity_score or 0),
-                        state.confirmed_stage,
-                        bool(state.lover_locked),
-                        state.unlocked_stage,
-                    ).value
                     state.save()
         return result
 

@@ -30,7 +30,6 @@ class AffinityCommandHandler:
         ]
         progress = calculate_stage_progress(
             float(state.affinity_score or 0),
-            getattr(state, "unlocked_stage", None) or state.effective_stage,
         )
         if progress["next_stage"]:
             lines.append(
@@ -127,8 +126,6 @@ class AffinityCommandHandler:
             ]
             if result.current_stage:
                 lines.append(f"当前阶段: {result.current_stage}")
-            if result.next_advance_stage:
-                lines.append(f"次日推进: {result.next_advance_stage}")
             if result.fallback_used:
                 lines.append("回退: 已使用硬规则")
             return "\n".join(lines)

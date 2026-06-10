@@ -161,31 +161,6 @@
     "type": "int",
     "default": 80
   },
-  "affinity_review_negative_cap": {
-    "description": "旧配置项：每日回顾负向下限。优化版优先使用 affinity_negative_cap 作为全局负向下限",
-    "type": "int",
-    "default": -60
-  },
-  "affinity_stage_advance_enabled": {
-    "description": "启用关系阶段每日推进",
-    "type": "bool",
-    "default": true
-  },
-  "affinity_stage_advance_max_steps_per_day": {
-    "description": "每天最多推进的关系阶段格数",
-    "type": "int",
-    "default": 1
-  },
-  "affinity_stage_advance_dynamic_threshold": {
-    "description": "好感银行余额达到该值时允许动态双阶推进",
-    "type": "int",
-    "default": 3
-  },
-  "affinity_stage_advance_dynamic_max_steps": {
-    "description": "动态推进触发后的每日最大推进格数",
-    "type": "int",
-    "default": 2
-  },
   "affinity_consecutive_30d_bonus": {
     "description": "连续互动 30 天后的每日回顾奖励",
     "type": "float",

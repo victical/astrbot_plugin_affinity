@@ -32,15 +32,11 @@ def effective_stage(
     score: float,
     confirmed_stage: str | None,
     lover_locked: bool,
-    unlocked_stage: str | None = None,
+    unlocked_stage: str | None = None,  # 已废弃，保留仅为兼容性
 ) -> RelationshipStage:
+    # 恋人锁定逻辑
     if lover_locked and confirmed_stage == RelationshipStage.LOVER.value:
         return RelationshipStage.LOVER
 
-    if unlocked_stage:
-        try:
-            return RelationshipStage(unlocked_stage)
-        except ValueError:
-            pass
-
+    # 直接根据分数返回对应阶段
     return score_stage(score)

@@ -16,7 +16,6 @@ from ..core.rules import (
     daily_key,
 )
 from ..core.stage import effective_stage, score_stage
-from ..core.stage_progression import advance_stage_dynamic, bank_balance
 from ..db_manager import AffinityDatabaseManager
 from .affinity_service import parse_event_date
 from .conversation_slicer import slice_conversation
@@ -46,8 +45,6 @@ class DailyReviewResult:
     discarded_signal_count: int = 0
     fallback_used: bool = False
     current_stage: str = ""
-    bank_balance: int = 0
-    next_advance_stage: str = ""
 
 
 @dataclass(slots=True)
@@ -458,8 +455,6 @@ class DailyReviewService:
         state = self.db.get_or_create_user_state(user_id)
         state.daily_review_at = datetime.now()
         state.save()
-        if self.stage_advance_enabled:
-            self.advance_stage_for_day(user_id, event_day)
         counter_updates = {
             "review_positive_delta": written_positive_delta,
             "review_negative_delta": written_negative_delta,
@@ -484,61 +479,10 @@ class DailyReviewService:
 
     def _stage_diagnostics(self, user_id: str, projected_delta: float = 0) -> dict[str, Any]:
         state = self.db.get_or_create_user_state(user_id)
-        current = getattr(state, "unlocked_stage", None) or state.effective_stage
         projected_score = float(state.affinity_score or 0) + float(projected_delta or 0)
-        target = score_stage(projected_score).value
+        current_stage = score_stage(projected_score).value
         return {
-            "current_stage": current,
-            "bank_balance": bank_balance(projected_score, current),
-            "next_advance_stage": advance_stage_dynamic(
-                current,
-                target,
-                bank_balance(projected_score, current),
-                dynamic_threshold=self.stage_advance_dynamic_threshold,
-                base_max_steps=self.max_stage_steps_per_day,
-                boosted_max_steps=self.stage_advance_dynamic_max_steps,
-            ),
+            "current_stage": current_stage,
         }
 
-    def advance_stage_for_day(self, user_id: str, event_day: date) -> None:
-        state = self.db.get_or_create_user_state(user_id)
-        if state.last_stage_advance_date == event_day:
-            return
-        current = getattr(state, "unlocked_stage", None) or state.effective_stage
-        target = score_stage(float(state.affinity_score or 0)).value
-        balance = bank_balance(float(state.affinity_score or 0), current)
-        next_stage = advance_stage_dynamic(
-            current,
-            target,
-            balance,
-            dynamic_threshold=self.stage_advance_dynamic_threshold,
-            base_max_steps=self.max_stage_steps_per_day,
-            boosted_max_steps=self.stage_advance_dynamic_max_steps,
-        )
-        if next_stage != current:
-            self.db.insert_event(
-                user_id=user_id,
-                event_type=AffinityEventType.STAGE_UNLOCK.value,
-                score_delta=0,
-                reason=f"每日刷新推进关系阶段 (余额:{balance})",
-                source="stage_progression",
-                source_ref=event_day.isoformat(),
-                event_date=event_day,
-                idempotency_key=f"stage-unlock:{user_id}:{event_day.isoformat()}:{current}:{next_stage}",
-                metadata_json={
-                    "direction": "up",
-                    "from_stage": current,
-                    "to_stage": next_stage,
-                    "score": float(state.affinity_score or 0),
-                    "bank_balance": balance,
-                },
-            )
-            state.unlocked_stage = next_stage
-        state.last_stage_advance_date = event_day
-        state.effective_stage = effective_stage(
-            float(state.affinity_score or 0),
-            state.confirmed_stage,
-            bool(state.lover_locked),
-            state.unlocked_stage,
-        ).value
-        state.save()
+    # advance_stage_for_day 方法已移除：阶段推进改为实时更新，不再需要每日推进逻辑
