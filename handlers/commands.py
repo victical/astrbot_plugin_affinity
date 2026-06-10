@@ -19,9 +19,13 @@ class AffinityCommandHandler:
 
     def format_query(self, state, display_name: str | None = None) -> str:
         display_user = str(display_name or "").strip() or state.user_id
+        today_delta = self._get_today_delta(state.user_id)
+        score_text = f"{float(state.affinity_score):.0f}"
+        if today_delta != 0:
+            score_text += f" (今日{today_delta:+.0f})"
         lines = [
             f"用户: {display_user}",
-            f"好感度: {float(state.affinity_score):.0f}",
+            f"好感度: {score_text}",
             f"关系阶段: {state.effective_stage}",
         ]
         progress = calculate_stage_progress(
@@ -34,9 +38,17 @@ class AffinityCommandHandler:
                 f"{progress['score_needed']}分 "
                 f"(预计{progress['days_estimate']}天)"
             )
-            if progress["bank_balance"] > 0:
-                lines.append(f"银行余额: {progress['bank_balance']}阶")
         return "\n".join(lines)
+
+    def _get_today_delta(self, user_id: str) -> float:
+        from datetime import date
+        counter = self.service.db.get_or_create_daily_counter(user_id, date.today())
+        return (
+            float(counter.realtime_positive_delta or 0)
+            + float(counter.negative_delta or 0)
+            + float(counter.memory_recall_count or 0)
+            + float(counter.profile_growth_count or 0)
+        )
 
     async def handle_query(self, user_id: str, display_name: str | None = None) -> str:
         state = self.service.db.get_or_create_user_state(user_id)
@@ -117,7 +129,6 @@ class AffinityCommandHandler:
                 lines.append(f"当前阶段: {result.current_stage}")
             if result.next_advance_stage:
                 lines.append(f"次日推进: {result.next_advance_stage}")
-            lines.append(f"好感银行: {result.bank_balance}")
             if result.fallback_used:
                 lines.append("回退: 已使用硬规则")
             return "\n".join(lines)

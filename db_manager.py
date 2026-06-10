@@ -603,12 +603,49 @@ class AffinityDatabaseManager:
         event_date: date,
         **fields: Any,
     ) -> AffinityDailyCounter:
-        counter = self.get_or_create_daily_counter(user_id, event_date)
-        for key, value in fields.items():
-            setattr(counter, key, value)
-        counter.updated_at = _utcnow()
-        counter.save()
-        return counter
+        self.get_or_create_daily_counter(user_id, event_date)
+        self.AffinityDailyCounter.update(updated_at=_utcnow(), **fields).where(
+            (self.AffinityDailyCounter.user_id == user_id)
+            & (self.AffinityDailyCounter.event_date == event_date)
+        ).execute()
+        return self.get_or_create_daily_counter(user_id, event_date)
+
+    def increment_daily_counter(
+        self,
+        user_id: str,
+        event_date: date,
+        **increments: float,
+    ) -> AffinityDailyCounter:
+        self.get_or_create_daily_counter(user_id, event_date)
+        update_fields = {"updated_at": _utcnow()}
+        for field, delta in increments.items():
+            column = getattr(self.AffinityDailyCounter, field)
+            update_fields[field] = column + delta
+        self.AffinityDailyCounter.update(**update_fields).where(
+            (self.AffinityDailyCounter.user_id == user_id)
+            & (self.AffinityDailyCounter.event_date == event_date)
+        ).execute()
+        return self.get_or_create_daily_counter(user_id, event_date)
+
+    def cleanup_old_events(self, days_to_keep: int = 90) -> int:
+        from datetime import timedelta
+        cutoff = date.today() - timedelta(days=days_to_keep)
+        deleted = self.AffinityEvent.delete().where(
+            self.AffinityEvent.event_date < cutoff
+        ).execute()
+        return deleted
+
+    def cleanup_old_counters(self, days_to_keep: int = 90) -> int:
+        from datetime import timedelta
+        cutoff = date.today() - timedelta(days=days_to_keep)
+        deleted = self.AffinityDailyCounter.delete().where(
+            self.AffinityDailyCounter.event_date < cutoff
+        ).execute()
+        return deleted
+
+    def maintenance(self) -> None:
+        self.db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.db.execute_sql("VACUUM")
 
     def reset_user(self, user_id: str) -> AffinityUserState:
         with self.db.atomic():

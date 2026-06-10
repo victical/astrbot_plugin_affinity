@@ -44,12 +44,20 @@ def _event_user_id(event: AstrMessageEvent) -> str:
 
 
 def _event_message_id(event: AstrMessageEvent) -> str:
+    import hashlib
     message_obj = getattr(event, "message_obj", None)
     for attr in ("message_id", "message_id_str", "id"):
         value = getattr(message_obj, attr, None)
         if value:
             return str(value)
-    return f"{_event_user_id(event)}:{id(event)}"
+    user_id = _event_user_id(event)
+    timestamp = getattr(event, "timestamp", None) or getattr(message_obj, "time", None)
+    if not timestamp:
+        import time
+        timestamp = int(time.time() * 1000)
+    content = str(getattr(message_obj, "message", ""))
+    content_hash = hashlib.md5(content.encode()).hexdigest()[:8]
+    return f"{user_id}:{timestamp}:{content_hash}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +340,7 @@ class AffinityPlugin(Star):
         self.scheduler = DailyReviewScheduler(
             review_service=self.daily_review_service,
             provider=self.memory_provider,
+            db_manager=self.db,
             hour=int(
                 _config_get(
                     self.config,
@@ -553,6 +562,12 @@ class AffinityPlugin(Star):
         user_id = _event_user_id(event)
         if not user_id:
             return
+
+        # 记录实时互动
+        message_id = _event_message_id(event)
+        if message_id:
+            await self.service.record_daily_chat(user_id, message_id)
+
         snapshot = self.service.get_user_snapshot(user_id)
         is_group = bool(event.get_group_id()) if hasattr(event, "get_group_id") else False
         max_stage_custom_prompt = str(

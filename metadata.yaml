@@ -1,6 +1,6 @@
 name: astrbot_plugin_affinity
 desc: 好感度与关系系统插件
 help: 使用 /好感查询 查看关系状态
-version: 1.3.2
+version: 1.3.4
 author: victical
 repo: https://github.com/victical/astrbot_plugin_affinity.git

@@ -237,12 +237,11 @@ class AffinityService:
         )
         if result.applied:
             applied_delta = float(result.event.score_delta or 0) if result.event else 0
-            self.db.update_daily_counter(
+            self.db.increment_daily_counter(
                 user_id,
                 event_day,
-                realtime_positive_delta=float(counter.realtime_positive_delta or 0)
-                + applied_delta,
-                daily_chat_turns=float(counter.daily_chat_turns or 0) + 1,
+                realtime_positive_delta=applied_delta,
+                daily_chat_turns=1,
             )
             self._update_interaction_streak(user_id, event_day)
         return result
@@ -275,11 +274,10 @@ class AffinityService:
         )
         if result.applied:
             applied_delta = float(result.event.score_delta or 0) if result.event else 0
-            self.db.update_daily_counter(
+            self.db.increment_daily_counter(
                 user_id,
                 event_day,
-                memory_recall_count=float(counter.memory_recall_count or 0)
-                + applied_delta,
+                memory_recall_count=applied_delta,
             )
         return result
 
@@ -304,10 +302,10 @@ class AffinityService:
             idempotency_key=_event_key("profile", user_id, event_day.isoformat(), source_ref),
         )
         if result.applied:
-            self.db.update_daily_counter(
+            self.db.increment_daily_counter(
                 user_id,
                 event_day,
-                profile_growth_count=float(counter.profile_growth_count or 0) + delta,
+                profile_growth_count=delta,
             )
         return result
 
@@ -357,12 +355,17 @@ class AffinityService:
             idempotency_key=_event_key("negative", user_id, event_day.isoformat(), event_type, source_ref),
         )
         if result.applied:
-            self.db.update_daily_counter(
+            self.db.increment_daily_counter(
                 user_id,
                 event_day,
-                negative_delta=float(counter.negative_delta or 0) + capped_delta,
-                last_negative_event_date=event_day if capped_delta < 0 else latest_negative_day,
+                negative_delta=capped_delta,
             )
+            if capped_delta < 0:
+                self.db.update_daily_counter(
+                    user_id,
+                    event_day,
+                    last_negative_event_date=event_day,
+                )
             state = result.user_state
             if state is not None and capped_delta < 0:
                 target = score_stage(float(state.affinity_score or 0)).value

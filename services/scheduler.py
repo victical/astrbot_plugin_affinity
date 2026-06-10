@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 
 
 class DailyReviewScheduler:
-    def __init__(self, review_service, provider, hour: int = 4):
+    def __init__(self, review_service, provider, hour: int = 4, db_manager=None):
         self.review_service = review_service
         self.provider = provider
+        self.db_manager = db_manager
         self.hour = max(0, min(23, int(hour)))
         self.task: asyncio.Task | None = None
         self._stopped = False
@@ -36,6 +37,11 @@ class DailyReviewScheduler:
             yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
             for user_id in user_ids:
                 await self.review_service.run_for_user(user_id, yesterday)
+
+            if self.db_manager and datetime.now().day == 1:
+                self.db_manager.cleanup_old_events(days_to_keep=90)
+                self.db_manager.cleanup_old_counters(days_to_keep=90)
+                self.db_manager.maintenance()
 
     def _seconds_until_next_run(self) -> float:
         now = datetime.now()
